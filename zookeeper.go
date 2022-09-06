@@ -12,6 +12,9 @@ import (
 	"github.com/kvtools/valkeyrie/store"
 )
 
+// StoreName the name of the store.
+const StoreName = "zookeeper"
+
 const (
 	// SOH control character.
 	SOH = "\x01"
@@ -21,20 +24,37 @@ const (
 	syncRetryLimit = 5
 )
 
-// Register registers zookeeper to valkeyrie.
-func Register() {
-	valkeyrie.AddStore(store.ZK, New)
+// registers Zookeeper to Valkeyrie.
+func init() {
+	valkeyrie.Register(StoreName, newStore)
 }
 
-// Zookeeper is the receiver type for the Store interface.
-type Zookeeper struct {
+// Config the Zookeeper configuration.
+type Config struct {
+	ConnectionTimeout time.Duration
+	Username          string
+	Password          string
+	MaxBufferSize     int
+}
+
+func newStore(ctx context.Context, endpoints []string, options valkeyrie.Config) (store.Store, error) {
+	cfg, ok := options.(*Config)
+	if !ok && cfg != nil {
+		return nil, &store.InvalidConfigurationError{Store: StoreName, Config: options}
+	}
+
+	return New(ctx, endpoints, cfg)
+}
+
+// Store implements the store.Store interface.
+type Store struct {
 	timeout time.Duration
 	client  *zk.Conn
 }
 
-// New creates a new Zookeeper client given a list of endpoints and an optional TLS config.
-func New(_ context.Context, endpoints []string, options *store.Config) (store.Store, error) {
-	s := &Zookeeper{}
+// New creates a new Zookeeper client.
+func New(_ context.Context, endpoints []string, options *Config) (store.Store, error) {
+	s := &Store{}
 	s.timeout = defaultTimeout
 
 	// Set options.
@@ -69,13 +89,13 @@ func New(_ context.Context, endpoints []string, options *store.Config) (store.St
 }
 
 // setTimeout sets the timeout for connecting to Zookeeper.
-func (s *Zookeeper) setTimeout(timeout time.Duration) {
+func (s *Store) setTimeout(timeout time.Duration) {
 	s.timeout = timeout
 }
 
 // Get the value at "key".
 // Returns the last modified index to use in conjunction to Atomic calls.
-func (s *Zookeeper) Get(_ context.Context, key string, _ *store.ReadOptions) (pair *store.KVPair, err error) {
+func (s *Store) Get(_ context.Context, key string, _ *store.ReadOptions) (pair *store.KVPair, err error) {
 	resp, meta, err := s.get(key)
 	if err != nil {
 		return nil, err
@@ -92,7 +112,7 @@ func (s *Zookeeper) Get(_ context.Context, key string, _ *store.ReadOptions) (pa
 
 // createFullPath creates the entire path for a directory
 // that does not exist and sets the value of the last znode to data.
-func (s *Zookeeper) createFullPath(path []string, data []byte, ephemeral bool) error {
+func (s *Store) createFullPath(path []string, data []byte, ephemeral bool) error {
 	for i := 1; i <= len(path); i++ {
 		newPath := "/" + strings.Join(path[:i], "/")
 
@@ -117,8 +137,8 @@ func (s *Zookeeper) createFullPath(path []string, data []byte, ephemeral bool) e
 }
 
 // Put a value at "key".
-func (s *Zookeeper) Put(ctx context.Context, key string, value []byte, opts *store.WriteOptions) error {
-	fkey := s.normalize(key)
+func (s *Store) Put(ctx context.Context, key string, value []byte, opts *store.WriteOptions) error {
+	fkey := normalize(key)
 
 	exists, err := s.Exists(ctx, key, nil)
 	if err != nil {
@@ -139,8 +159,8 @@ func (s *Zookeeper) Put(ctx context.Context, key string, value []byte, opts *sto
 }
 
 // Delete a value at "key".
-func (s *Zookeeper) Delete(_ context.Context, key string) error {
-	err := s.client.Delete(s.normalize(key), -1)
+func (s *Store) Delete(_ context.Context, key string) error {
+	err := s.client.Delete(normalize(key), -1)
 	if errors.Is(err, zk.ErrNoNode) {
 		return store.ErrKeyNotFound
 	}
@@ -148,8 +168,8 @@ func (s *Zookeeper) Delete(_ context.Context, key string) error {
 }
 
 // Exists checks if the key exists inside the store.
-func (s *Zookeeper) Exists(_ context.Context, key string, _ *store.ReadOptions) (bool, error) {
-	exists, _, err := s.client.Exists(s.normalize(key))
+func (s *Store) Exists(_ context.Context, key string, _ *store.ReadOptions) (bool, error) {
+	exists, _, err := s.client.Exists(normalize(key))
 	if err != nil {
 		return false, err
 	}
@@ -160,7 +180,7 @@ func (s *Zookeeper) Exists(_ context.Context, key string, _ *store.ReadOptions) 
 // It returns a channel that will receive changes or pass on errors.
 // Upon creation, the current value will first be sent to the channel.
 // Providing a non-nil stopCh can be used to stop watching.
-func (s *Zookeeper) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-chan *store.KVPair, error) {
+func (s *Store) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-chan *store.KVPair, error) {
 	// Catch zk notifications and fire changes into the channel.
 	watchCh := make(chan *store.KVPair)
 	go func() {
@@ -199,7 +219,7 @@ func (s *Zookeeper) Watch(ctx context.Context, key string, _ *store.ReadOptions)
 // It returns a channel that will receive changes or pass on errors.
 // Upon creating a watch, the current children values will be sent to the channel.
 // Providing a non-nil stopCh can be used to stop watching.
-func (s *Zookeeper) WatchTree(ctx context.Context, directory string, opts *store.ReadOptions) (<-chan []*store.KVPair, error) {
+func (s *Store) WatchTree(ctx context.Context, directory string, opts *store.ReadOptions) (<-chan []*store.KVPair, error) {
 	// Catch zk notifications and fire changes into the channel.
 	watchCh := make(chan []*store.KVPair)
 
@@ -209,7 +229,7 @@ func (s *Zookeeper) WatchTree(ctx context.Context, directory string, opts *store
 		fireEvt := true
 		for {
 		WATCH:
-			keys, _, eventCh, err := s.client.ChildrenW(s.normalize(directory))
+			keys, _, eventCh, err := s.client.ChildrenW(normalize(directory))
 			if err != nil {
 				return
 			}
@@ -239,8 +259,8 @@ func (s *Zookeeper) WatchTree(ctx context.Context, directory string, opts *store
 }
 
 // listChildren lists the direct children of a directory.
-func (s *Zookeeper) listChildren(directory string) ([]string, error) {
-	children, _, err := s.client.Children(s.normalize(directory))
+func (s *Store) listChildren(directory string) ([]string, error) {
+	children, _, err := s.client.Children(normalize(directory))
 	if err != nil {
 		if errors.Is(err, zk.ErrNoNode) {
 			return nil, store.ErrKeyNotFound
@@ -252,7 +272,7 @@ func (s *Zookeeper) listChildren(directory string) ([]string, error) {
 
 // listChildrenRecursive lists the children of a directory
 // as well as all the descending children from sub-folders in a recursive fashion.
-func (s *Zookeeper) listChildrenRecursive(list *[]string, directory string) error {
+func (s *Store) listChildrenRecursive(list *[]string, directory string) error {
 	children, err := s.listChildren(directory)
 	if err != nil {
 		return err
@@ -276,7 +296,7 @@ func (s *Zookeeper) listChildrenRecursive(list *[]string, directory string) erro
 }
 
 // List child nodes of a given directory.
-func (s *Zookeeper) List(ctx context.Context, directory string, opts *store.ReadOptions) ([]*store.KVPair, error) {
+func (s *Store) List(ctx context.Context, directory string, opts *store.ReadOptions) ([]*store.KVPair, error) {
 	children := make([]string, 0)
 
 	err := s.listChildrenRecursive(&children, directory)
@@ -297,7 +317,7 @@ func (s *Zookeeper) List(ctx context.Context, directory string, opts *store.Read
 }
 
 // DeleteTree deletes a range of keys under a given directory.
-func (s *Zookeeper) DeleteTree(_ context.Context, directory string) error {
+func (s *Store) DeleteTree(_ context.Context, directory string) error {
 	children, err := s.listChildren(directory)
 	if err != nil {
 		return err
@@ -307,7 +327,7 @@ func (s *Zookeeper) DeleteTree(_ context.Context, directory string) error {
 
 	for _, c := range children {
 		reqs = append(reqs, &zk.DeleteRequest{
-			Path:    s.normalize(directory + "/" + c),
+			Path:    normalize(directory + "/" + c),
 			Version: -1,
 		})
 	}
@@ -318,9 +338,9 @@ func (s *Zookeeper) DeleteTree(_ context.Context, directory string) error {
 
 // AtomicPut puts a value at "key" if the key has not been modified in the meantime,
 // throws an error if this is the case.
-func (s *Zookeeper) AtomicPut(_ context.Context, key string, value []byte, previous *store.KVPair, _ *store.WriteOptions) (bool, *store.KVPair, error) {
+func (s *Store) AtomicPut(_ context.Context, key string, value []byte, previous *store.KVPair, _ *store.WriteOptions) (bool, *store.KVPair, error) {
 	if previous != nil {
-		meta, err := s.client.Set(s.normalize(key), value, int32(previous.LastIndex))
+		meta, err := s.client.Set(normalize(key), value, int32(previous.LastIndex))
 		if err != nil {
 			// Compare Failed.
 			if errors.Is(err, zk.ErrBadVersion) {
@@ -339,7 +359,7 @@ func (s *Zookeeper) AtomicPut(_ context.Context, key string, value []byte, previ
 	}
 
 	// Interpret previous == nil as create operation.
-	_, err := s.client.Create(s.normalize(key), value, 0, zk.WorldACL(zk.PermAll))
+	_, err := s.client.Create(normalize(key), value, 0, zk.WorldACL(zk.PermAll))
 	if err != nil { //nolint:nestif // require a deep refactor.
 		// Node Exists error (when previous nil).
 		if errors.Is(err, zk.ErrNodeExists) {
@@ -364,7 +384,7 @@ func (s *Zookeeper) AtomicPut(_ context.Context, key string, value []byte, previ
 		}
 
 		// Create the node.
-		_, err := s.client.Create(s.normalize(key), value, 0, zk.WorldACL(zk.PermAll))
+		_, err := s.client.Create(normalize(key), value, 0, zk.WorldACL(zk.PermAll))
 		if err != nil {
 			// Node exist error (when previous nil).
 			if errors.Is(err, zk.ErrNodeExists) {
@@ -385,12 +405,12 @@ func (s *Zookeeper) AtomicPut(_ context.Context, key string, value []byte, previ
 
 // AtomicDelete deletes a value at "key" if the key has not been modified in the meantime,
 // throws an error if this is the case.
-func (s *Zookeeper) AtomicDelete(_ context.Context, key string, previous *store.KVPair) (bool, error) {
+func (s *Store) AtomicDelete(_ context.Context, key string, previous *store.KVPair) (bool, error) {
 	if previous == nil {
 		return false, store.ErrPreviousNotSpecified
 	}
 
-	err := s.client.Delete(s.normalize(key), int32(previous.LastIndex))
+	err := s.client.Delete(normalize(key), int32(previous.LastIndex))
 	if err != nil {
 		// Key not found.
 		if errors.Is(err, zk.ErrNoNode) {
@@ -407,7 +427,7 @@ func (s *Zookeeper) AtomicDelete(_ context.Context, key string, previous *store.
 }
 
 // NewLock returns a handle to a lock struct which can be used to provide mutual exclusion on a key.
-func (s *Zookeeper) NewLock(_ context.Context, key string, opts *store.LockOptions) (lock store.Locker, err error) {
+func (s *Store) NewLock(_ context.Context, key string, opts *store.LockOptions) (lock store.Locker, err error) {
 	value := []byte("")
 
 	// Apply options.
@@ -419,26 +439,21 @@ func (s *Zookeeper) NewLock(_ context.Context, key string, opts *store.LockOptio
 
 	lock = &zookeeperLock{
 		client: s.client,
-		key:    s.normalize(key),
+		key:    normalize(key),
 		value:  value,
-		lock:   zk.NewLock(s.client, s.normalize(key), zk.WorldACL(zk.PermAll)),
+		lock:   zk.NewLock(s.client, normalize(key), zk.WorldACL(zk.PermAll)),
 	}
 
 	return lock, err
 }
 
 // Close closes the client connection.
-func (s *Zookeeper) Close() error {
+func (s *Store) Close() error {
 	s.client.Close()
 	return nil
 }
 
-// normalize the key for usage in Zookeeper.
-func (s *Zookeeper) normalize(key string) string {
-	return strings.TrimSuffix(store.Normalize(key), "/")
-}
-
-func (s *Zookeeper) get(key string) ([]byte, *zk.Stat, error) {
+func (s *Store) get(key string) ([]byte, *zk.Stat, error) {
 	var resp []byte
 	var meta *zk.Stat
 	var err error
@@ -447,7 +462,7 @@ func (s *Zookeeper) get(key string) ([]byte, *zk.Stat, error) {
 	// creating and writing to znodes non-atomically,
 	// we try to resync few times if we read SOH or an empty string.
 	for i := 0; i <= syncRetryLimit; i++ {
-		resp, meta, err = s.client.Get(s.normalize(key))
+		resp, meta, err = s.client.Get(normalize(key))
 
 		if err != nil {
 			if errors.Is(err, zk.ErrNoNode) {
@@ -461,7 +476,7 @@ func (s *Zookeeper) get(key string) ([]byte, *zk.Stat, error) {
 		}
 
 		if i < syncRetryLimit {
-			if _, err = s.client.Sync(s.normalize(key)); err != nil {
+			if _, err = s.client.Sync(normalize(key)); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -469,7 +484,7 @@ func (s *Zookeeper) get(key string) ([]byte, *zk.Stat, error) {
 	return resp, meta, nil
 }
 
-func (s *Zookeeper) getW(key string) ([]byte, *zk.Stat, <-chan zk.Event, error) {
+func (s *Store) getW(key string) ([]byte, *zk.Stat, <-chan zk.Event, error) {
 	var resp []byte
 	var meta *zk.Stat
 	var ech <-chan zk.Event
@@ -479,7 +494,7 @@ func (s *Zookeeper) getW(key string) ([]byte, *zk.Stat, <-chan zk.Event, error) 
 	// creating and writing to znodes non-atomically,
 	// We try to resync few times if we read SOH or an empty string.
 	for i := 0; i <= syncRetryLimit; i++ {
-		resp, meta, ech, err = s.client.GetW(s.normalize(key))
+		resp, meta, ech, err = s.client.GetW(normalize(key))
 
 		if err != nil {
 			if errors.Is(err, zk.ErrNoNode) {
@@ -493,7 +508,7 @@ func (s *Zookeeper) getW(key string) ([]byte, *zk.Stat, <-chan zk.Event, error) 
 		}
 
 		if i < syncRetryLimit {
-			if _, err = s.client.Sync(s.normalize(key)); err != nil {
+			if _, err = s.client.Sync(normalize(key)); err != nil {
 				return nil, nil, nil, err
 			}
 		}
@@ -505,11 +520,11 @@ func (s *Zookeeper) getW(key string) ([]byte, *zk.Stat, <-chan zk.Event, error) 
 //
 // This is generally used when we get a list of child keys which
 // are stripped out of their path (for example when using ChildrenW).
-func (s *Zookeeper) getListWithPath(ctx context.Context, path string, keys []string, opts *store.ReadOptions) ([]*store.KVPair, error) {
-	kvs := []*store.KVPair{}
+func (s *Store) getListWithPath(ctx context.Context, path string, keys []string, opts *store.ReadOptions) ([]*store.KVPair, error) {
+	var kvs []*store.KVPair
 
 	for _, key := range keys {
-		pair, err := s.Get(ctx, strings.TrimSuffix(path, "/")+s.normalize(key), opts)
+		pair, err := s.Get(ctx, strings.TrimSuffix(path, "/")+normalize(key), opts)
 		if err != nil {
 			return nil, err
 		}
@@ -527,8 +542,8 @@ func (s *Zookeeper) getListWithPath(ctx context.Context, path string, keys []str
 // getList returns key/value pairs from a list of keys.
 //
 // This is generally used when we have a full list of keys with their full path included.
-func (s *Zookeeper) getList(ctx context.Context, keys []string, _ *store.ReadOptions) ([]*store.KVPair, error) {
-	kvs := []*store.KVPair{}
+func (s *Store) getList(ctx context.Context, keys []string, _ *store.ReadOptions) ([]*store.KVPair, error) {
+	var kvs []*store.KVPair
 
 	for _, key := range keys {
 		pair, err := s.Get(ctx, strings.TrimSuffix(key, "/"), nil)
@@ -601,4 +616,9 @@ func (l *zookeeperLock) monitorLock(ctx context.Context, lostCh chan struct{}) {
 			return
 		}
 	}
+}
+
+// normalize the key for usage in Zookeeper.
+func normalize(key string) string {
+	return strings.TrimSuffix("/"+strings.TrimPrefix(key, "/"), "/")
 }
