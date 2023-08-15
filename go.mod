@@ -1,11 +1,11 @@
 module github.com/kvtools/zookeeper
 
-go 1.18
+go 1.19
 
 require (
 	github.com/go-zookeeper/zk v1.0.3
 	github.com/kvtools/valkeyrie v1.0.0
-	github.com/stretchr/testify v1.8.0
+	github.com/stretchr/testify v1.8.4
 )
 
 require (
