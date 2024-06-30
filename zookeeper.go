@@ -463,7 +463,6 @@ func (s *Store) get(key string) ([]byte, *zk.Stat, error) {
 	// we try to resync few times if we read SOH or an empty string.
 	for i := 0; i <= syncRetryLimit; i++ {
 		resp, meta, err = s.client.Get(normalize(key))
-
 		if err != nil {
 			if errors.Is(err, zk.ErrNoNode) {
 				return nil, nil, store.ErrKeyNotFound
@@ -495,7 +494,6 @@ func (s *Store) getW(key string) ([]byte, *zk.Stat, <-chan zk.Event, error) {
 	// We try to resync few times if we read SOH or an empty string.
 	for i := 0; i <= syncRetryLimit; i++ {
 		resp, meta, ech, err = s.client.GetW(normalize(key))
-
 		if err != nil {
 			if errors.Is(err, zk.ErrNoNode) {
 				return nil, nil, nil, store.ErrKeyNotFound
