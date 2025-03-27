@@ -1,6 +1,6 @@
 module github.com/kvtools/zookeeper
 
-go 1.19
+go 1.22
 
 require (
 	github.com/go-zookeeper/zk v1.0.4
