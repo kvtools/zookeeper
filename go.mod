@@ -5,7 +5,7 @@ go 1.22
 require (
 	github.com/go-zookeeper/zk v1.0.4
 	github.com/kvtools/valkeyrie v1.0.0
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 )
 
 require (
