@@ -65,13 +65,17 @@ func New(_ context.Context, endpoints []string, options *Config) (store.Store, e
 	}
 
 	// Connect to Zookeeper.
-	var conn *zk.Conn
-	var err error
+	var (
+		conn *zk.Conn
+		err  error
+	)
+
 	if options != nil && options.MaxBufferSize > 0 {
 		conn, _, err = zk.Connect(endpoints, s.timeout, zk.WithMaxConnBufferSize(options.MaxBufferSize))
 	} else {
 		conn, _, err = zk.Connect(endpoints, s.timeout)
 	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -121,8 +125,13 @@ func (s *Store) createFullPath(path []string, data []byte, ephemeral bool) error
 			if ephemeral {
 				flag = zk.FlagEphemeral
 			}
+
 			_, err := s.client.Create(newPath, data, int32(flag), zk.WorldACL(zk.PermAll))
-			return err
+			if err != nil {
+				return err
+			}
+
+			return nil
 		}
 
 		_, err := s.client.Create(newPath, []byte{}, 0, zk.WorldACL(zk.PermAll))
@@ -133,6 +142,7 @@ func (s *Store) createFullPath(path []string, data []byte, ephemeral bool) error
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -164,6 +174,7 @@ func (s *Store) Delete(_ context.Context, key string) error {
 	if errors.Is(err, zk.ErrNoNode) {
 		return store.ErrKeyNotFound
 	}
+
 	return err
 }
 
@@ -173,6 +184,7 @@ func (s *Store) Exists(_ context.Context, key string, _ *store.ReadOptions) (boo
 	if err != nil {
 		return false, err
 	}
+
 	return exists, nil
 }
 
@@ -187,11 +199,13 @@ func (s *Store) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-
 		defer close(watchCh)
 
 		fireEvt := true
+
 		for {
 			resp, meta, eventCh, err := s.getW(key)
 			if err != nil {
 				return
 			}
+
 			if fireEvt {
 				watchCh <- &store.KVPair{
 					Key:       key,
@@ -199,6 +213,7 @@ func (s *Store) Watch(ctx context.Context, key string, _ *store.ReadOptions) (<-
 					LastIndex: uint64(meta.Version),
 				}
 			}
+
 			select {
 			case e := <-eventCh:
 				// Only fire an event if the data in the node changed.
@@ -227,12 +242,14 @@ func (s *Store) WatchTree(ctx context.Context, directory string, opts *store.Rea
 		defer close(watchCh)
 
 		fireEvt := true
+
 		for {
 		WATCH:
 			keys, _, eventCh, err := s.client.ChildrenW(normalize(directory))
 			if err != nil {
 				return
 			}
+
 			if fireEvt {
 				kvs, err := s.getListWithPath(ctx, directory, keys, opts)
 				if err != nil {
@@ -240,8 +257,10 @@ func (s *Store) WatchTree(ctx context.Context, directory string, opts *store.Rea
 					// the list may be out of date so try again.
 					goto WATCH
 				}
+
 				watchCh <- kvs
 			}
+
 			select {
 			case e := <-eventCh:
 				// Only fire an event if the children have changed.
@@ -265,8 +284,10 @@ func (s *Store) listChildren(directory string) ([]string, error) {
 		if errors.Is(err, zk.ErrNoNode) {
 			return nil, store.ErrKeyNotFound
 		}
+
 		return nil, err
 	}
+
 	return children, nil
 }
 
@@ -285,10 +306,12 @@ func (s *Store) listChildrenRecursive(list *[]string, directory string) error {
 
 	for _, c := range children {
 		c = strings.TrimSuffix(directory, "/") + "/" + c
+
 		err := s.listChildrenRecursive(list, c)
 		if err != nil && !errors.Is(err, zk.ErrNoChildrenForEphemerals) {
 			return err
 		}
+
 		*list = append(*list, c)
 	}
 
@@ -310,6 +333,7 @@ func (s *Store) List(ctx context.Context, directory string, opts *store.ReadOpti
 		if errors.Is(err, store.ErrKeyNotFound) {
 			return s.List(ctx, directory, opts)
 		}
+
 		return nil, err
 	}
 
@@ -323,7 +347,7 @@ func (s *Store) DeleteTree(_ context.Context, directory string) error {
 		return err
 	}
 
-	var reqs []interface{}
+	var reqs []any
 
 	for _, c := range children {
 		reqs = append(reqs, &zk.DeleteRequest{
@@ -333,7 +357,11 @@ func (s *Store) DeleteTree(_ context.Context, directory string) error {
 	}
 
 	_, err = s.client.Multi(reqs...)
-	return err
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // AtomicPut puts a value at "key" if the key has not been modified in the meantime,
@@ -346,6 +374,7 @@ func (s *Store) AtomicPut(_ context.Context, key string, value []byte, previous 
 			if errors.Is(err, zk.ErrBadVersion) {
 				return false, nil, store.ErrKeyModified
 			}
+
 			return false, nil, err
 		}
 
@@ -390,6 +419,7 @@ func (s *Store) AtomicPut(_ context.Context, key string, value []byte, previous 
 			if errors.Is(err, zk.ErrNodeExists) {
 				return false, nil, store.ErrKeyExists
 			}
+
 			return false, nil, err
 		}
 	}
@@ -412,17 +442,21 @@ func (s *Store) AtomicDelete(_ context.Context, key string, previous *store.KVPa
 
 	err := s.client.Delete(normalize(key), int32(previous.LastIndex))
 	if err != nil {
+		switch {
 		// Key not found.
-		if errors.Is(err, zk.ErrNoNode) {
+		case errors.Is(err, zk.ErrNoNode):
 			return false, store.ErrKeyNotFound
-		}
+
 		// Compare failed.
-		if errors.Is(err, zk.ErrBadVersion) {
+		case errors.Is(err, zk.ErrBadVersion):
 			return false, store.ErrKeyModified
-		}
+
 		// General store error.
-		return false, err
+		default:
+			return false, err
+		}
 	}
+
 	return true, nil
 }
 
@@ -454,9 +488,11 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) get(key string) ([]byte, *zk.Stat, error) {
-	var resp []byte
-	var meta *zk.Stat
-	var err error
+	var (
+		resp []byte
+		meta *zk.Stat
+		err  error
+	)
 
 	// To guard against older versions of valkeyrie
 	// creating and writing to znodes non-atomically,
@@ -467,6 +503,7 @@ func (s *Store) get(key string) ([]byte, *zk.Stat, error) {
 			if errors.Is(err, zk.ErrNoNode) {
 				return nil, nil, store.ErrKeyNotFound
 			}
+
 			return nil, nil, err
 		}
 
@@ -475,19 +512,23 @@ func (s *Store) get(key string) ([]byte, *zk.Stat, error) {
 		}
 
 		if i < syncRetryLimit {
-			if _, err = s.client.Sync(normalize(key)); err != nil {
+			_, err = s.client.Sync(normalize(key))
+			if err != nil {
 				return nil, nil, err
 			}
 		}
 	}
+
 	return resp, meta, nil
 }
 
 func (s *Store) getW(key string) ([]byte, *zk.Stat, <-chan zk.Event, error) {
-	var resp []byte
-	var meta *zk.Stat
-	var ech <-chan zk.Event
-	var err error
+	var (
+		resp []byte
+		meta *zk.Stat
+		ech  <-chan zk.Event
+		err  error
+	)
 
 	// To guard against older versions of valkeyrie
 	// creating and writing to znodes non-atomically,
@@ -498,6 +539,7 @@ func (s *Store) getW(key string) ([]byte, *zk.Stat, <-chan zk.Event, error) {
 			if errors.Is(err, zk.ErrNoNode) {
 				return nil, nil, nil, store.ErrKeyNotFound
 			}
+
 			return nil, nil, nil, err
 		}
 
@@ -506,11 +548,13 @@ func (s *Store) getW(key string) ([]byte, *zk.Stat, <-chan zk.Event, error) {
 		}
 
 		if i < syncRetryLimit {
-			if _, err = s.client.Sync(normalize(key)); err != nil {
+			_, err = s.client.Sync(normalize(key))
+			if err != nil {
 				return nil, nil, nil, err
 			}
 		}
 	}
+
 	return resp, meta, ech, nil
 }
 
@@ -572,6 +616,7 @@ func (l *zookeeperLock) Lock(ctx context.Context) (<-chan struct{}, error) {
 	err := l.lock.Lock()
 
 	lostCh := make(chan struct{})
+
 	if err == nil {
 		// We hold the lock, we can set our value.
 		_, err = l.client.Set(l.key, l.value, -1)
@@ -598,6 +643,7 @@ func (l *zookeeperLock) monitorLock(ctx context.Context, lostCh chan struct{}) {
 			// We failed to set watch, relinquish the lock.
 			return
 		}
+
 		select {
 		case e := <-eventCh:
 			if e.Type == zk.EventNotWatching ||
